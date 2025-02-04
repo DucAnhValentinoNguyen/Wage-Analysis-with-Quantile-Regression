@@ -1,0 +1,290 @@
+---
+title: "WageAnalysisWithQuantileReg"
+author: "Duc-Anh Nguyen"
+date: "2025-02-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This dataset from the ISLR package contains information about yearly incomes of 3,000 male workers in the Mid-Atlantic region of the United States. 
+
+####Goal: 
+model yearly income as a function of age and education.
+
+### EDA
+```{r}
+# Load the necessary packages
+#install.packages("ISLR")
+library(ISLR)
+library(ggplot2)
+library(dplyr)
+# Load and clean the data
+data("Wage")
+wage  <-  Wage
+dim(wage)
+wage |> head()
+skimr::skim(wage)
+wage|> str()
+
+wage |> colnames()
+# "year"       "age"        "maritl"     "race"       "education"  "region"     "jobclass"  "health"     "health_ins" "logwage"    "wage"    
+
+table(Wage$age)
+
+ggplot(wage, aes(x = wage)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "lightblue", color = "black") +
+  geom_density(color = "red", lwd = 1) +
+  labs(title = "Distribution of Wage", x = "Wage", x = "Density") +
+  theme_minimal()
+
+
+ggplot(wage, aes(x = logwage)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "lightblue", color = "black") +
+  geom_density(color = "red", lwd = 1) +
+  labs(title = "Distribution of logwage", x = "logwage", x = "Density") +
+  theme_minimal()
+
+wage |> ggplot(aes(wage)) + geom_boxplot()
+wage |> ggplot(aes(logwage)) + geom_boxplot()
+```
+It does not seem like our target value follows a normal distribution!
+
+
+```{r}
+wage |> ggplot(aes(x = age, y = wage, color = education)) +  geom_point()
+
+wage |> ggplot(aes(x = age, y = logwage, color = education)) +  geom_point()
+
+ggplot(wage, aes(x = age, y = wage)) + geom_point() + facet_wrap(~education)
+```
+It seems like there are patterns in our data, a violation to assumption of iid random variables!
+
+
+### Linear regression
+```{r}
+# check for no autocorrelation (independent residuals) 
+# Durbin-Watson test: Should be ~2 (if near 0 or 4, autocorrelation exists).
+library(lmtest)
+model <- lm(wage ~ age + education, data = wage)
+dwtest(lm(wage ~ age + education, data = wage))
+plot(lm(wage ~ age + education, data = wage), which = 1)
+plot(lm(wage ~ age + education, data = wage), which = 2)
+plot(lm(wage ~ age + education, data = wage), which = 3)
+plot(lm(wage ~ age + education, data = wage), which = 4)
+
+# Diagnostic plots
+plot(model, what = "wp")
+```
+
+
+### Quantile Regression
+```{r}
+# install.packages("quantreg")
+library(quantreg)
+wage$AgeGroup <- cut(wage$age, breaks = c(30, 40, 50, 60, 70), right = FALSE)
+# wage[is.na(wage$AgeGroup),] 
+wage <- wage[complete.cases(wage), ]
+wage |> dim()
+
+# Create a subset of age groups and visualize wage distributions by education
+ggplot(wage, aes(x = education, y = wage, fill = education)) +
+  geom_boxplot() +
+  facet_wrap( ~ AgeGroup) +
+  theme_bw()
+
+```
+It seems that higher education levels generally associated with higher wages, which is reasonable.
+
+
+```{r}
+library(tidyr)
+
+age_group <- wage |>
+  filter(AgeGroup == "[30,40)")
+
+# Fit quantile regression models for multiple taus
+taus <- seq(0.1, 0.9, by = 0.1)
+models <- rq(wage~education, data = age_group, tau = taus)
+
+# Combine coefficients into a data frame for visualization
+coefficients <- coef(models)
+# coefficients add up
+coefficients
+
+coefficients_cumsum <- apply(coefficients, 2, cumsum) |>
+  as.data.frame() |>
+  # rows to column
+  tibble::rownames_to_column(var = "education") |>
+  pivot_longer(cols = starts_with("tau"),
+               names_to = "tau",
+               values_to = "quantile") |>
+  mutate(tau = stringr::str_extract(tau, "[0-9.]+") |> as.numeric()) |>
+  mutate(
+    #replace (Intercept) with No Education and all "education" if it is there
+    education = if_else(education == "(Intercept)", "1. No Grad", education),
+    education = stringr::str_replace(education, "education", "")
+  )
+
+coefficients_cumsum
+
+# Visualization of coefficients
+ggplot(coefficients_cumsum, aes(x = tau, y = quantile, color = education)) +
+  geom_line() +
+  geom_point() +
+  theme_bw() +
+  labs(
+    title = "Quantile Regression",
+    x = "Quantile (tau)",
+    y = "Estimated Quantile",
+    color = "Education Level"
+  )
+
+# Check for crossing by comparing coefficients, it should be a monotonic relationship between all the quantile
+coefficients_cumsum |>
+  group_by(education) |>
+  summarise(crossing = any(diff(quantile) < 0))
+
+
+```
+What is here worth to mention is, that as the quantiles increase, the wage gap between individuals with different education levels becomes more pronounced. At the quantile 0.1 the gap are way smaller than at the quantile 0.9, the lines diverge significantly, showing that the wage disparity grows at higher income levels.
+
+As there is no quantile crossing, these models are good fit for our dataset
+
+ 
+ 
+ 
+# TODO: fit the other AgeGroup!
+
+```{r}
+
+
+```
+
+
+Let try modeling with GAMLSS!
+
+### GAMLSS
+```{r}
+# Load the necessary package
+library(gamlss)
+
+
+model_gamlss <-
+  gamlss(
+    wage ~ education + age,
+    sigma.formula = ~ education,
+    family = NO,
+    data = wage
+  )
+# gamlss(wage~education+age, sigma.formula = ~education+age, family = NO, data = wage) |> summary()
+
+# Extend the model with smoothing terms
+model_smooth <- gamlss(
+  wage ~ cs(age) + education,
+  sigma.formula = ~ education,
+  family = NO,
+  data = wage
+)
+
+# Compare using AIC and BIC
+AIC(model_gamlss, model_smooth)
+BIC(model_gamlss, model_smooth)
+
+```
+
+smooth_term does help fitting the model better w.r.t. AIC !
+Let us then visualise it!
+```{r}
+# Create a grid of age and education
+education_levels <- unique(Wage$education)
+age_seq <- seq(min(Wage$age), max(Wage$age), length.out = 100)
+prediction_grid <- expand.grid(age = age_seq,  education = education_levels)
+
+# Add predictions for each combination
+prediction_grid$mu <-
+  predict(model_smooth, newdata = prediction_grid, what = "mu")
+
+# Plot predictions for all education levels
+ggplot(prediction_grid, aes(x = age, y = mu, color = education)) +
+  geom_line() +
+  theme_bw() +
+  labs(
+    title = "Effect of Age on Mean Wage by Education Level",
+    x = "Age",
+    y = "Predicted Mean Wage",
+    color = "Education Level"
+  )
+                               
+# Diagnostic plots
+plot(model_smooth, what = "wp")
+```
+The residuals show no major deviations, indicating that the distributional assumptions are valid
+
+
+```{r}
+
+# Compare residuals
+par(mfrow = c(1, 2))
+plot(resid(model), main = "Linear Model Residuals")
+plot(resid(model_smooth), main = "GAMLSS Residuals")
+
+
+
+```
+The linear model residuals show systematic deviations, whereas the GAMLSS residuals are more randomly distributed, indicating a better fit.
+ 
+The residuals of the linear model show a clear pattern, indicating systematic deviations. This suggests that the linear model fails to capture the full complexity of the data, possibly due to unmodeled heteroskedasticity (variance changing with predictors, this could be because of skewness because of the outliers).
+
+Different Y-Axis Scales: The y-axis scale for the linear model is much larger because it measures raw residuals, which include systematic errors due to misspecification of the mean structure. In contrast, GAMLSS standardizes residuals relative to the fitted distribution (e.g., variance, skewness), resulting in smaller and comparable residuals.
+ 
+ 
+
+### Evaluation with MSE
+```{r}
+
+# Partition the data.
+set.seed(111)
+train_index <- sample(1:nrow(wage), size = 0.75 * nrow(wage))
+train <- wage[train_index,]
+test <- wage[-train_index,]
+
+# Predict on the test set.
+
+# Predict on the test set using lm
+lm_predictions <- predict(model, newdata = test)
+model_smooth <- gamlss(
+  wage ~ cs(age) + education,
+  sigma.formula = ~ education,
+  family = NO,
+  data = test
+)
+model_not_smooth <- gamlss(
+  wage ~ age + education,
+  sigma.formula = ~ education,
+  family = NO,
+  data = test
+)
+
+# Compute MSE for lm
+lm_mse <- mean((test$wage - lm_predictions) ^ 2)
+# Compute MSE for the distributional regression model
+distreg_predictions_smooth <-
+  predictAll(model_smooth, newdata = test)
+
+distreg_mse_smooth <-
+  mean((test$wage - distreg_predictions_smooth$mu) ^ 2)
+distreg_predictions <- predictAll(model_not_smooth, newdata = test)
+distreg_mse <- mean((test$wage - distreg_predictions$mu) ^ 2)
+
+
+# Compare the MSEs
+cat("MSE for Linear Regression: ", lm_mse, "\n")
+cat("MSE for Distributional Regression: ", distreg_mse_smooth, "\n")
+cat("MSE for Distributional Regression: ", distreg_mse, "\n")
+
+
+```
